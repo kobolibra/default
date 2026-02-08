@@ -1,0 +1,70 @@
+name: Fetch and Process Economist
+
+on:
+  schedule:
+    - cron: '0 1 * * 6'  # 每周六上午9点
+  workflow_dispatch:  # 允许手动触发
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install beautifulsoup4 lxml requests
+
+      - name: Find latest issue and download
+        run: |
+          mkdir -p input
+          
+          # 获取最新文件夹
+          LATEST_FOLDER=$(curl -s "https://api.github.com/repos/hehonghui/awesome-english-ebooks/contents/01_economist?ref=master" | \
+            python3 -c "import sys, json; folders=[i['name'] for i in json.load(sys.stdin) if i['type']=='dir']; print(sorted(folders)[-1])")
+          
+          echo "Latest folder: $LATEST_FOLDER"
+          echo "FOLDER=$LATEST_FOLDER" >> $GITHUB_ENV
+          
+          # 下载 EPUB
+          curl -L -o input/economist.epub \
+            "https://raw.githubusercontent.com/hehonghui/awesome-english-ebooks/master/01_economist/${LATEST_FOLDER}/economist.epub"
+          
+          ls -lh input/
+          echo "Downloaded successfully"
+
+      - name: Process EPUB
+        run: python scripts/process.py
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: './output'
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
