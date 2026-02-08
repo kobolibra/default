@@ -50,7 +50,6 @@ jobs:
           # 构建下载链接
           DOWNLOAD_URL="https://raw.githubusercontent.com/hehonghui/awesome-english-ebooks/master/01_economist/${LATEST_FOLDER}/${FILENAME}"
           echo "Download URL: $DOWNLOAD_URL"
-          echo "URL=$DOWNLOAD_URL" >> $GITHUB_ENV
           
           # 下载
           curl -L --fail -o input/economist.epub "$DOWNLOAD_URL"
@@ -58,9 +57,6 @@ jobs:
           # 验证
           echo "File size:"
           ls -lh input/economist.epub
-          
-          echo "File type:"
-          file input/economist.epub || echo "file command not available"
           
           # 检查是否为有效 ZIP
           if ! unzip -t input/economist.epub > /dev/null 2>&1; then
