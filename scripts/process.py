@@ -5,7 +5,7 @@ import zipfile
 import shutil
 import re
 from datetime import datetime
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString
 
 def main():
     print("=" * 50)
@@ -29,43 +29,45 @@ def main():
     # 复制图片
     copy_images('temp_epub', 'output/images')
     
-    # 收集所有 HTML 文件
+    # 先读取目录页，获取 section 顺序
+    sections_order = extract_toc_structure('temp_epub')
+    print(f"\nFound sections: {list(sections_order.keys())}")
+    
+    # 收集所有 HTML 文件，按文件名排序保持顺序
     html_files = []
     for root, dirs, files in os.walk('temp_epub'):
-        for f in files:
+        for f in sorted(files):  # 排序保持顺序
             if f.endswith(('.html', '.xhtml', '.htm')):
-                # 跳过明显不是文章的文件
-                if any(x in f.lower() for x in ['nav', 'toc', 'cover', 'copyright']):
+                if any(x in f.lower() for x in ['nav', 'cover', 'copyright']):
                     continue
                 filepath = os.path.join(root, f)
                 html_files.append(filepath)
     
-    print(f"\nFound {len(html_files)} HTML files")
+    print(f"\nProcessing {len(html_files)} HTML files...")
     
-    # 解析所有文件
+    # 按顺序处理文件，保持文章顺序
     all_articles = []
-    for filepath in sorted(html_files):
+    for filepath in html_files:
         try:
             with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
                 content = f.read()
             
-            # 检查是否包含 Economist 内容
             if 'The Economist' not in content and 'economist.com' not in content:
                 continue
             
-            articles = parse_html_file(content, filepath)
+            articles = parse_html_file(content, filepath, sections_order)
             all_articles.extend(articles)
             
         except Exception as e:
             print(f"Error in {os.path.basename(filepath)}: {e}")
     
-    print(f"\nTotal articles: {len(all_articles)}")
+    print(f"\nTotal articles extracted: {len(all_articles)}")
     
     if not all_articles:
         print("ERROR: No articles found!")
         sys.exit(1)
     
-    # 去重（按 slug）
+    # 去重（按 slug），但保持顺序
     seen = set()
     unique_articles = []
     for art in all_articles:
@@ -75,8 +77,8 @@ def main():
     
     print(f"Unique articles: {len(unique_articles)}")
     
-    # 生成
-    generate_index(unique_articles)
+    # 生成网站
+    generate_index(unique_articles, sections_order)
     generate_rss(unique_articles)
     
     shutil.rmtree('temp_epub')
@@ -91,8 +93,43 @@ def copy_images(source_dir, output_dir):
                     dst = os.path.join(output_dir, f)
                     shutil.copy2(src, dst)
 
-def parse_html_file(html_content, source_file):
-    """解析 HTML 文件，可能包含多篇文章"""
+def extract_toc_structure(epub_root):
+    """从目录页提取 section 顺序"""
+    sections = {}
+    
+    # 找目录文件
+    toc_files = ['nav.xhtml', 'toc.xhtml', 'book_toc.html']
+    toc_content = None
+    
+    for toc_file in toc_files:
+        toc_path = os.path.join(epub_root, 'EPUB', toc_file)
+        if os.path.exists(toc_path):
+            with open(toc_path, 'r', encoding='utf-8', errors='ignore') as f:
+                toc_content = f.read()
+            break
+    
+    if not toc_content:
+        return sections
+    
+    soup = BeautifulSoup(toc_content, 'html.parser')
+    
+    # 提取所有链接文本作为 section 名称
+    order = 0
+    for link in soup.find_all('a'):
+        text = link.get_text(strip=True)
+        # 过滤掉具体文章标题，保留 section 名称
+        # Section 名称通常较短，且在大纲中
+        if text and len(text) < 100 and not text.startswith('http'):
+            # 标准化 section 名称
+            section_key = text.strip()
+            if section_key not in sections:
+                sections[section_key] = {'order': order, 'articles': []}
+                order += 1
+    
+    return sections
+
+def parse_html_file(html_content, source_file, sections_order):
+    """解析 HTML 文件"""
     articles = []
     
     soup = BeautifulSoup(html_content, 'html.parser')
@@ -101,131 +138,157 @@ def parse_html_file(html_content, source_file):
     for tag in soup(['script', 'style']):
         tag.decompose()
     
-    # 获取所有文本
-    full_text = soup.get_text('\n', strip=True)
+    # 获取 body
+    body = soup.find('body')
+    if not body:
+        return articles
     
-    # 检查是否是目录页（包含大量链接，短内容）
-    links = soup.find_all('a')
-    text_content = soup.get_text(strip=True)
+    # 策略：查找所有文章容器
+    # Economist 文章通常有特定的 class 或结构
     
-    # 如果是目录页（链接多，文本少），也保留作为导航
-    is_toc = len(links) > 5 and len(text_content) < 2000
+    # 方法1：找 h1 标题，然后收集后续内容直到下一个 h1
+    headings = body.find_all(['h1', 'h2'])
     
-    # 找文章 - 可能一个文件有多篇，或者一篇长文
-    
-    # 策略1：按 h1/h2 分割
-    # 策略2：查找特定模式 "Leaders |" 等
-    
-    # 先找 section 标记（如 "Leaders | Greenback danger"）
-    section_pattern = r'(Leaders|Briefing|United States|China|Asia|Europe|Britain|International|Business|Finance|Science|Culture|Obituary|Letters|By Invitation|The Americas|Middle East|Africa)\s*\|\s*([^\n]+)'
-    
-    matches = list(re.finditer(section_pattern, full_text, re.IGNORECASE))
-    
-    if matches:
-        # 有明确的 section 标记，按此分割
-        for i, match in enumerate(matches):
-            section_name = match.group(1)
-            subtitle = match.group(2).strip()
-            
-            # 提取这段内容
-            start = match.start()
-            end = matches[i+1].start() if i+1 < len(matches) else len(full_text)
-            section_text = full_text[start:end]
-            
-            # 找标题（通常在下一行）
-            lines = section_text.split('\n')
-            title = ""
-            date = ""
-            content_lines = []
-            
-            for j, line in enumerate(lines[1:], 1):
-                line = line.strip()
-                if not line:
-                    continue
-                
-                # 跳过 subtitle 重复
-                if line == subtitle or subtitle in line:
-                    continue
-                
-                # 找标题（大写开头，较长）
-                if not title and len(line) > 10 and line[0].isupper():
-                    title = line
-                    continue
-                
-                # 找日期
-                if not date and ('2026' in line or '2025' in line or 'January' in line or 'February' in line):
-                    date = line
-                    continue
-                
-                # 其余是内容
-                if title:
-                    content_lines.append(line)
-            
-            if title and len('\n'.join(content_lines)) > 100:
-                article = create_article(title, date, section_name, '\n'.join(content_lines))
-                if article:
-                    articles.append(article)
-                    print(f"  ✓ [{section_name}] {title[:50]}...")
-    
-    else:
-        # 没有 section 标记，尝试按 h1/h2 分割
-        body = soup.find('body')
-        if body:
-            # 找所有标题
-            headings = body.find_all(['h1', 'h2', 'h3'])
-            
-            for i, h in enumerate(headings):
-                title = h.get_text(strip=True)
-                
-                # 获取这个标题到下一个标题之间的内容
-                content = []
-                for sibling in h.find_next_siblings():
-                    if sibling.name in ['h1', 'h2', 'h3']:
-                        break
-                    text = sibling.get_text(strip=True)
-                    if text:
-                        content.append(text)
-                
-                content_text = '\n'.join(content)
-                
-                # 提取日期（如果有）
-                date = ""
-                date_match = re.search(r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(st|nd|rd|th)?\s+202[56]', content_text)
-                if date_match:
-                    date = date_match.group(0)
-                
-                if len(content_text) > 200 and title:
-                    article = create_article(title, date, "", content_text)
-                    if article:
-                        articles.append(article)
-                        print(f"  ✓ {title[:50]}...")
-    
-    # 如果以上都失败，把整个文件作为一篇文章
-    if not articles and len(text_content) > 500:
-        # 尝试提取标题
-        h1 = soup.find('h1')
-        title = h1.get_text(strip=True) if h1 else "Untitled"
+    for i, heading in enumerate(headings):
+        # 判断这是否是文章标题（而非 section 标题）
+        heading_text = heading.get_text(strip=True)
         
-        # 清理内容
-        for tag in soup(['nav', 'header', 'footer']):
-            tag.decompose()
+        # 跳过太短的（可能是章节标记）
+        if len(heading_text) < 5:
+            continue
         
-        body = soup.find('body')
-        if body:
-            article = create_article(title, "", "", str(body))
+        # 跳过纯日期
+        if re.match(r'^(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(st|nd|rd|th)?,?\s+202[56]$', heading_text):
+            continue
+        
+        # 找 section（通常在 heading 前面或上面）
+        section = find_section_for_heading(heading, sections_order)
+        
+        # 找日期（通常在 heading 附近）
+        date = find_date_near_heading(heading)
+        
+        # 收集内容（保持 HTML 结构）
+        content_html = collect_content_until_next_heading(heading, headings[i+1] if i+1 < len(headings) else None)
+        
+        if len(content_html) > 200:
+            article = create_article(heading_text, date, section, content_html)
             if article:
                 articles.append(article)
-                print(f"  ✓ [Full page] {title[:50]}...")
+                print(f"  ✓ [{section or 'Other'}] {heading_text[:50]}...")
     
     return articles
 
-def create_article(title, date, section, content):
-    """创建文章文件"""
+def find_section_for_heading(heading, sections_order):
+    """找 heading 所属的 section"""
+    # 向上查找 section 标记
+    current = heading
+    for _ in range(10):  # 向上找10层
+        if current.previous_sibling:
+            current = current.previous_sibling
+            if isinstance(current, NavigableString):
+                text = str(current).strip()
+                # 检查是否是已知的 section
+                for sec in sections_order.keys():
+                    if sec.lower() in text.lower():
+                        return sec
+        else:
+            current = current.parent
+            if current and current.name in ['body']:
+                break
+    
+    # 从文本内容推断
+    full_text = heading.get_text()
+    # 检查是否有 "Section | Title" 格式
+    if '|' in full_text:
+        parts = full_text.split('|')
+        if len(parts) >= 2:
+            section_candidate = parts[0].strip()
+            for sec in sections_order.keys():
+                if sec.lower() in section_candidate.lower():
+                    return sec
+    
+    return ""
+
+def find_date_near_heading(heading):
+    """在 heading 附近找日期"""
+    # 向后查找
+    current = heading
+    for _ in range(5):
+        current = current.next_sibling
+        if not current:
+            break
+        if isinstance(current, NavigableString):
+            text = str(current).strip()
+            # 匹配日期格式
+            date_match = re.search(r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(st|nd|rd|th)?,?\s+202[56]', text)
+            if date_match:
+                return date_match.group(0)
+        elif hasattr(current, 'get_text'):
+            text = current.get_text(strip=True)
+            date_match = re.search(r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(st|nd|rd|th)?,?\s+202[56]', text)
+            if date_match:
+                return date_match.group(0)
+    
+    return ""
+
+def collect_content_until_next_heading(start_heading, next_heading):
+    """收集从 start_heading 到 next_heading 之间的内容，保持 HTML 结构"""
+    content_parts = []
+    
+    current = start_heading.next_sibling
+    
+    while current and current != next_heading:
+        # 跳过导航元素
+        if hasattr(current, 'name') and current.name in ['nav', 'header']:
+            current = current.next_sibling
+            continue
+        
+        # 收集内容
+        if isinstance(current, NavigableString):
+            text = str(current).strip()
+            if text:
+                content_parts.append(f'<p>{text}</p>')
+        else:
+            # 保持 HTML 标签，但修复图片路径
+            html = str(current)
+            # 修复图片路径
+            html = re.sub(r'src=["\']static_images/', 'src="/images/', html)
+            html = re.sub(r'src=["\']../static_images/', 'src="/images/', html)
+            html = re.sub(r'src=["\']../../static_images/', 'src="/images/', html)
+            content_parts.append(html)
+        
+        current = current.next_sibling
+    
+    return '\n'.join(content_parts)
+
+def create_article(title, date, section, content_html):
+    """创建文章"""
     
     # 清理标题
     title = re.sub(r'\s+', ' ', title).strip()
+    
+    # 移除标题中的 section 部分（如果有 | 分隔）
+    if '|' in title:
+        parts = title.split('|')
+        if len(parts) >= 2:
+            title = parts[-1].strip()
+    
+    # 如果标题是日期，尝试从内容找真正的标题
+    if re.match(r'^(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}', title):
+        # 从内容第一行找
+        first_line = re.search(r'<p>([^<]+)</p>', content_html)
+        if first_line:
+            potential_title = first_line.group(1).strip()
+            if len(potential_title) > 10 and not re.match(r'^\d', potential_title):
+                title = potential_title
+                # 从内容中移除这行
+                content_html = re.sub(r'^<p>' + re.escape(potential_title) + r'</p>', '', content_html, count=1)
+    
     if len(title) > 150:
         title = title[:147] + "..."
+    
+    if not title or len(title) < 5:
+        return None
     
     # 生成 slug
     slug = re.sub(r'[^\w\s-]', '', title).strip().replace(' ', '-').lower()[:50]
@@ -239,7 +302,7 @@ def create_article(title, date, section, content):
         counter += 1
     
     # 清理内容
-    content = clean_content(content)
+    content_html = clean_content(content_html)
     
     art_path = f'articles/{slug}.html'
     
@@ -289,9 +352,27 @@ def create_article(title, date, section, content):
             display: block;
             margin: 20px auto;
         }}
+        figure {{
+            margin: 20px 0;
+            text-align: center;
+        }}
+        figcaption {{
+            font-size: 14px;
+            color: #666;
+            font-style: italic;
+            margin-top: 8px;
+        }}
         a {{
             color: #e3120b;
             text-decoration: none;
+        }}
+        a:hover {{
+            text-decoration: underline;
+        }}
+        h2, h3 {{
+            font-size: 24px;
+            margin: 30px 0 15px 0;
+            font-weight: normal;
         }}
     </style>
 </head>
@@ -299,7 +380,7 @@ def create_article(title, date, section, content):
     {f'<div class="section">{section}</div>' if section else ''}
     <h1>{title}</h1>
     {f'<div class="date">{date}</div>' if date else ''}
-    {content}
+    {content_html}
 </body>
 </html>'''
     
@@ -314,35 +395,43 @@ def create_article(title, date, section, content):
         'section': section
     }
 
-def clean_content(content):
+def clean_content(content_html):
     """清理内容"""
-    # 如果是纯文本，包装成段落
-    if not content.strip().startswith('<'):
-        paragraphs = content.split('\n\n')
-        paragraphs = [f'<p>{p.strip()}</p>' for p in paragraphs if p.strip()]
-        content = '\n'.join(paragraphs)
-    
-    # 修复图片路径
-    content = re.sub(r'src=["\']static_images/', 'src="/images/', content)
-    content = re.sub(r'src=["\']../static_images/', 'src="/images/', content)
-    
     # 移除下载信息
-    content = re.sub(r'This article was downloaded by zlibrary from https?://\S+', '', content)
+    content_html = re.sub(r'<p>This article was downloaded by zlibrary from https?://[^<]+</p>', '', content_html)
+    content_html = re.sub(r'This article was downloaded by zlibrary from https?://\S+', '', content_html)
     
-    return content
+    # 移除空段落
+    content_html = re.sub(r'<p>\s*</p>', '', content_html)
+    
+    # 修复连续多个换行
+    content_html = re.sub(r'\n{3,}', '\n\n', content_html)
+    
+    return content_html.strip()
 
-def generate_index(articles):
+def generate_index(articles, sections_order):
+    """生成索引页，保持 section 顺序"""
     repo = os.environ.get('GITHUB_REPOSITORY', 'user/repo')
     username, repo_name = repo.split('/')
     base_url = f"https://{username}.github.io/{repo_name}"
     
-    # 按 section 分组
+    # 按 section 分组，保持顺序
     by_section = {}
+    section_positions = {}
+    
     for art in articles:
         sec = art.get('section', 'Other')
         if sec not in by_section:
             by_section[sec] = []
+            # 记录 section 的原始顺序
+            if sec in sections_order:
+                section_positions[sec] = sections_order[sec].get('order', 999)
+            else:
+                section_positions[sec] = 999
         by_section[sec].append(art)
+    
+    # 按原始顺序排序 sections
+    sorted_sections = sorted(by_section.keys(), key=lambda x: section_positions.get(x, 999))
     
     html = f'''<!DOCTYPE html>
 <html lang="en">
@@ -416,8 +505,8 @@ def generate_index(articles):
         <div class="subtitle">{len(articles)} articles • Updated {datetime.now().strftime("%Y-%m-%d")}</div>
 '''
     
-    for sec in sorted(by_section.keys()):
-        html += f'<div class="section-title">{sec or "Other"}</div>\n'
+    for sec in sorted_sections:
+        html += f'<div class="section-title">{sec}</div>\n'
         for art in by_section[sec]:
             html += f'<div class="article"><a href="{art["path"]}">{art["title"]}</a></div>\n'
     
@@ -436,7 +525,7 @@ def generate_rss(articles):
     base_url = f"https://{username}.github.io/{repo_name}"
     
     items = []
-    for art in articles[:30]:  # RSS 最多 30 篇
+    for art in articles[:30]:
         try:
             with open(f'output/{art["path"]}', 'r', encoding='utf-8') as f:
                 content = f.read()
