@@ -29,9 +29,23 @@ def main():
         print("Error: input/economist.epub not found!")
         sys.exit(1)
     
+    # 验证文件大小
+    file_size = os.path.getsize('input/economist.epub')
+    print(f"EPUB file size: {file_size} bytes")
+    
+    if file_size < 10000:
+        print("Error: File too small, likely not a valid EPUB")
+        with open('input/economist.epub', 'r', encoding='utf-8', errors='ignore') as f:
+            print("Content preview:", f.read(500))
+        sys.exit(1)
+    
     # 解压 EPUB
     print("\nExtracting EPUB...")
     try:
+        if not zipfile.is_zipfile('input/economist.epub'):
+            print("Error: File is not a valid ZIP file")
+            sys.exit(1)
+            
         with zipfile.ZipFile('input/economist.epub', 'r') as z:
             z.extractall('temp_epub')
         print("EPUB extracted successfully")
@@ -103,19 +117,16 @@ def parse_articles(epub_root):
     
     # 找所有 HTML 文件
     for root, dirs, files in os.walk(epub_root):
-        # 跳过元数据目录
         if 'META-INF' in root:
             continue
             
         for f in files:
             if f.endswith(('.xhtml', '.html', '.htm')):
                 filepath = os.path.join(root, f)
-                # 跳过目录页和导航页
                 if any(skip in f.lower() for skip in ['nav', 'toc', 'cover', 'copyright', 'index']):
                     continue
                 content_files.append(filepath)
     
-    # 按文件名排序
     content_files.sort()
     print(f"Found {len(content_files)} content files")
     
@@ -124,39 +135,29 @@ def parse_articles(epub_root):
             with open(filepath, 'r', encoding='utf-8') as f:
                 content = f.read()
             
-            # 跳过太短的文件（可能是导航页）
             if len(content) < 2000:
                 continue
             
             soup = BeautifulSoup(content, 'html.parser')
             
-            # 移除 script 和 style
             for tag in soup(['script', 'style']):
                 tag.decompose()
             
-            # 提取标题
             title = extract_title(soup, filepath)
-            
-            # 获取正文
             body = soup.find('body')
+            
             if not body:
                 continue
             
-            # 清理并修复图片路径
             for img in body.find_all('img'):
                 src = img.get('src', '')
-                # 提取文件名
                 img_name = os.path.basename(src.replace('\\', '/'))
                 if img_name:
                     img['src'] = f'/images/{img_name}'
-                    # 移除可能导致问题的属性
                     img.pop('srcset', None)
                     img.pop('sizes', None)
             
-            # 生成唯一 slug
             slug = create_slug(title, articles)
-            
-            # 保存文章
             art_path = f'articles/{slug}.html'
             
             html_content = f'''<!DOCTYPE html>
@@ -253,34 +254,28 @@ def parse_articles(epub_root):
     return articles
 
 def extract_title(soup, filepath):
-    # 尝试多种方式找标题
     title = None
     
-    # 1. HTML title 标签
     title_tag = soup.find('title')
     if title_tag:
         title = title_tag.get_text(strip=True)
     
-    # 2. h1 标签
     if not title or len(title) < 3:
         h1 = soup.find('h1')
         if h1:
             title = h1.get_text(strip=True)
     
-    # 3. h2 标签
     if not title or len(title) < 3:
         h2 = soup.find('h2')
         if h2:
             title = h2.get_text(strip=True)
     
-    # 4. 从文件名推断
     if not title or len(title) < 3:
         filename = os.path.basename(filepath)
         title = filename.replace('.xhtml', '').replace('.html', '').replace('-', ' ').title()
     
-    # 清理
     title = re.sub(r'\s+', ' ', title).strip()
-    title = re.sub(r'^\d+\s*', '', title)  # 移除开头的数字
+    title = re.sub(r'^\d+\s*', '', title)
     
     if len(title) > 100:
         title = title[:97] + '...'
@@ -291,11 +286,9 @@ def extract_title(soup, filepath):
     return title
 
 def create_slug(title, existing_articles):
-    # 生成 URL slug
     slug = re.sub(r'[^\w\s-]', '', title).strip().replace(' ', '-').lower()[:50]
-    slug = re.sub(r'-+', '-', slug)  # 合并多个连字符
+    slug = re.sub(r'-+', '-', slug)
     
-    # 确保唯一
     counter = 1
     original_slug = slug
     existing_slugs = {a['slug'] for a in existing_articles}
@@ -307,7 +300,6 @@ def create_slug(title, existing_articles):
     return slug
 
 def generate_index(articles):
-    # 获取仓库信息用于 URL
     repo = os.environ.get('GITHUB_REPOSITORY', 'user/repo')
     username, repo_name = repo.split('/')
     base_url = f"https://{username}.github.io/{repo_name}"
@@ -426,36 +418,29 @@ def generate_index(articles):
     
     with open('output/index.html', 'w', encoding='utf-8') as f:
         f.write(html)
-    
-    print(f"Generated index with {len(articles)} articles")
 
 def generate_rss(articles):
     repo = os.environ.get('GITHUB_REPOSITORY', 'user/repo')
     username, repo_name = repo.split('/')
     base_url = f"https://{username}.github.io/{repo_name}"
     
-    # RSS 只包含最新 20 篇
     recent_articles = articles[:20]
-    
     items = []
+    
     for art in recent_articles:
         try:
             with open(f'output/{art["path"]}', 'r', encoding='utf-8') as f:
                 content = f.read()
             
-            # 提取 body 内容
             match = re.search(r'<body>(.*?)</body>', content, re.DOTALL | re.IGNORECASE)
             if match:
                 body_content = match.group(1)
-                # 移除 back-link
                 body_content = re.sub(r'<a[^>]*class="back-link"[^>]*>.*?</a>', '', body_content)
             else:
                 body_content = content
             
-            # 转义 CDATA 结束标记
             body_content = body_content.replace(']]>', ']]]]><![CDATA[>')
             
-            # 格式化日期为 RSS 格式
             pub_date = datetime.fromisoformat(art['date']).strftime('%a, %d %b %Y %H:%M:%S +0000')
             
             items.append(f'''
