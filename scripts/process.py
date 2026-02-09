@@ -20,7 +20,11 @@ ALLOWED_SECTIONS = {
     "business", 
     "finance & economics", 
     "science & technology", 
-    "culture"
+    "culture", 
+    "special reports",
+    "technology quarterly",
+    "essay",
+    "the economist reads"
 }
 
 def main():
