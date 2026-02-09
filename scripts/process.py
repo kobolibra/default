@@ -20,8 +20,11 @@ TARGET_SECTIONS = [
 ]
 
 def main():
-    shutil.rmtree("temp_epub", ignore_errors=True)
-    shutil.rmtree("output", exist_ok=True)
+    # 兼容旧版本 Python 的目录删除方式
+    if os.path.exists("temp_epub"):
+        shutil.rmtree("temp_epub")
+    if os.path.exists("output"):
+        shutil.rmtree("output")
 
     os.makedirs("temp_epub", exist_ok=True)
     os.makedirs("output/articles", exist_ok=True)
