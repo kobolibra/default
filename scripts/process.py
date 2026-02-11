@@ -11,6 +11,7 @@ from bs4 import BeautifulSoup
 
 INPUT_EPUB = "input/economist.epub"
 
+# 定义需要保留的 Section
 ALLOWED_SECTIONS = {
     "leaders", 
     "by invitation", 
@@ -61,7 +62,7 @@ def main():
     print(f"Done. Generated {len(articles)} articles.")
 
 # --------------------------------------------------
-# 辅助函数 (保持不变)
+# 基础功能函数
 # --------------------------------------------------
 
 def unzip_epub():
@@ -116,7 +117,7 @@ def extract_edition_date(base_dir, ordered_files):
     return ""
 
 # --------------------------------------------------
-# 针对性修改：解析逻辑
+# 核心解析逻辑：精准抓取 Section, Rubric 和 Title
 # --------------------------------------------------
 
 def parse_html_file(filepath, current_section, css_filename):
@@ -127,47 +128,74 @@ def parse_html_file(filepath, current_section, css_filename):
     if not body: return [], current_section
 
     articles = []
-    # 按照源文件结构扫描
-    tags = body.find_all(["h1", "h2"])
+    # 查找所有标题和段落，以便按顺序分析结构
+    elements = body.find_all(['h1', 'h2', 'p', 'div'])
     
-    for tag in tags:
-        if tag.name == "h2":
-            temp_section = tag.get_text(strip=True)
-            if temp_section: current_section = temp_section
+    for i, tag in enumerate(elements):
+        # 识别 Section (板块)
+        # 可能是 h2，也可能是带有特定类的 p/div
+        is_section = False
+        if tag.name == 'h2':
+            is_section = True
+        elif tag.get('class') and any(c in str(tag.get('class')).lower() for c in ['section', 'department']):
+            is_section = True
+            
+        if is_section:
+            temp_sec = tag.get_text(strip=True)
+            if temp_sec and len(temp_sec) < 50: # 避免误抓正文
+                current_section = temp_sec
             continue
 
+        # 识别 Article Start (主标题 h1)
         if tag.name == "h1":
             title = tag.get_text(strip=True)
-            
-            # --- 精准寻找 Rubric ---
-            # 逻辑：在 h1 附近寻找 class 包含 'rubric' 或 'kicker' 的 p 标签
-            rubric_text = ""
-            # 1. 检查紧邻的前一个标签
-            prev_tag = tag.find_previous_sibling()
-            if prev_tag and ('rubric' in str(prev_tag.get('class', [])) or 'kicker' in str(prev_tag.get('class', []))):
-                rubric_text = prev_tag.get_text(strip=True)
-            
-            # 2. 如果没找到，检查 h1 内部是否包裹了 rubric (某些版本会把 rubric 放在 h1 前面)
-            if not rubric_text:
-                candidate = tag.find_previous(["p", "div"])
-                if candidate and 'rubric' in str(candidate.get('class', [])):
-                    rubric_text = candidate.get_text(strip=True)
+            if not title: continue
 
-            # 构造页眉：Section | Rubric
-            header_display = f"{current_section}"
+            # --- 精准抓取 Rubric (副标题) ---
+            # 策略：向回查找，直到遇到上一个 h1 或 h2 之前的文本段落
+            rubric_text = ""
+            # 在当前元素之前的元素中寻找
+            for prev in reversed(elements[:i]):
+                if prev.name in ['h1', 'h2']: break # 撞到别的标题了，停止
+                
+                # 寻找 Rubric 特征：类名包含 rubric/kicker，或者就是 h1 紧邻的上方段落
+                p_text = prev.get_text(strip=True)
+                if not p_text: continue
+                
+                classes = str(prev.get('class', [])).lower()
+                if 'rubric' in classes or 'kicker' in classes or 'teaser' in classes:
+                    rubric_text = p_text
+                    break
+                # 如果没类名，但它是紧贴 h1 的短句，也极有可能是 Rubric
+                if prev.name == 'p' and len(p_text) < 150:
+                    rubric_text = p_text
+                    break
+
+            # 构造要求的页眉格式: Section | Rubric
+            header_display = current_section
             if rubric_text:
                 header_display += f" | {rubric_text}"
             
             fly_title_html = f'<div class="fly-title">{header_display}</div>'
             
-            # 收集内容
+            # 收集正文内容：从 h1 开始到下一个 h1/h2
             content_nodes = [tag]
             for sib in tag.next_siblings:
                 if getattr(sib, "name", None) in ["h1", "h2"]: break
+                # 同时也要检查带 section 类的 div
+                if getattr(sib, "name", None) == 'div' and sib.get('class') and 'section' in str(sib.get('class')):
+                    break
                 content_nodes.append(sib)
 
             article_html = fly_title_html + "".join(str(x) for x in content_nodes)
-            article_html = re.sub(r'src=["\']([^"\']*?/)?([^/"\']+\.(jpg|jpeg|png|gif|svg|webp))["\']', r'src="../images/\2"', article_html, flags=re.IGNORECASE)
+            
+            # 修复图片路径
+            article_html = re.sub(
+                r'src=["\']([^"\']*?/)?([^/"\']+\.(jpg|jpeg|png|gif|svg|webp))["\']', 
+                r'src="../images/\2"', 
+                article_html, 
+                flags=re.IGNORECASE
+            )
 
             if len(article_html) < 200: continue
 
@@ -192,7 +220,6 @@ def write_article(path, html_content, title, css_filename):
 <style>
     body {{ max-width: 850px; margin: 0 auto; padding: 20px; font-family: Georgia, serif; background-color: #fdfdfd; color: #111; line-height: 1.6; }}
     img {{ max-width: 100%; height: auto; display: block; margin: 20px auto; }}
-    /* 页眉样式：对应 Section | Rubric */
     .fly-title {{ 
         text-transform: uppercase; 
         font-size: 0.85em; 
@@ -200,11 +227,11 @@ def write_article(path, html_content, title, css_filename):
         margin-bottom: 12px;
         border-bottom: 1px solid #e0e0e0;
         padding-bottom: 6px;
-        font-family: "ITC Franklin Gothic", "Helvetica Neue", Arial, sans-serif;
-        font-weight: 700;
+        font-family: sans-serif;
+        font-weight: bold;
         letter-spacing: 0.08em;
     }}
-    h1 {{ font-size: 2.2em; line-height: 1.2; margin-top: 10px; }}
+    h1 {{ font-size: 2.1em; line-height: 1.2; margin-top: 10px; margin-bottom: 20px; }}
 </style>
 </head>
 <body class="article">
