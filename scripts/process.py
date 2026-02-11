@@ -6,7 +6,7 @@ import xml.etree.ElementTree as ET
 from bs4 import BeautifulSoup
 
 # --------------------------------------------------
-# 配置与常量 (保持不变)
+# 配置与常量
 # --------------------------------------------------
 
 INPUT_EPUB = "input/economist.epub"
@@ -34,14 +34,17 @@ def main():
     os.makedirs("output/articles", exist_ok=True)
     os.makedirs("output/images", exist_ok=True)
     os.makedirs("output/css", exist_ok=True)
+
     if not os.path.exists(INPUT_EPUB): return
     unzip_epub()
     copy_images()
     css_filename = copy_css()
     ordered_files = get_reading_order("temp_epub")
     edition_date = extract_edition_date("temp_epub", ordered_files)
+
     articles = []
     current_section = "Unknown" 
+
     for html_file in ordered_files:
         full_path = os.path.join("temp_epub", html_file)
         if not os.path.exists(full_path): continue
@@ -49,10 +52,11 @@ def main():
         for art in new_articles:
             if art['section'].strip().lower() in ALLOWED_SECTIONS:
                 articles.append(art)
+
     generate_index(articles, edition_date)
 
 # --------------------------------------------------
-# 基础功能 (保持不变)
+# 基础功能 (保持稳定，不改动)
 # --------------------------------------------------
 
 def unzip_epub():
@@ -106,7 +110,7 @@ def extract_edition_date(base_dir, ordered_files):
     return ""
 
 # --------------------------------------------------
-# 核心修改：精准解析和页眉去重
+# 核心修改：精准提取 Rubric 并去重
 # --------------------------------------------------
 
 def parse_html_file(filepath, current_section, css_filename):
@@ -116,58 +120,56 @@ def parse_html_file(filepath, current_section, css_filename):
     if not body: return [], current_section
 
     articles = []
-    # 查找 h1, h2 及带特定类的段落
-    tags = body.find_all(["h1", "h2", "p", "div"])
+    # 查找所有标题
+    all_h1s = body.find_all("h1")
     
-    for tag in tags:
-        # 1. 识别 Section 板块标题
-        if tag.name == "h2" or (tag.get('class') and 'section' in str(tag.get('class')).lower()):
-            txt = tag.get_text(strip=True)
-            if txt and len(txt) < 40: # 过滤长段落误抓
-                current_section = txt
-            continue
+    # 在处理文件前，先看有没有新的板块标题
+    h2_tag = body.find("h2")
+    if h2_tag:
+        txt = h2_tag.get_text(strip=True)
+        if txt: current_section = txt
 
-        # 2. 识别 Article 主标题
-        if tag.name == "h1":
-            title = tag.get_text(strip=True)
-            if not title: continue
+    for h1_tag in all_h1s:
+        title = h1_tag.get_text(strip=True)
+        if not title: continue
 
-            # --- 精准抓取 Rubric (页眉后面那部分) ---
-            # 逻辑：查找 h1 前面最近的一个类名包含 rubric 的标签
-            rubric_text = ""
-            prev = tag.find_previous_sibling(["p", "div"])
-            if prev:
-                classes = str(prev.get('class', [])).lower()
-                if 'rubric' in classes or 'kicker' in classes:
-                    rubric_text = prev.get_text(strip=True)
+        # --- 重点：抓取 Rubric (页眉后面那部分) ---
+        # 逻辑：在当前 h1 之前寻找最近的类名为 rubric 或 kicker 的标签
+        rubric_text = ""
+        # 向上寻找最近的一个包含 rubric 文本的标签
+        potential_rubric = h1_tag.find_previous(["p", "div", "span"])
+        if potential_rubric:
+            cls = str(potential_rubric.get("class", "")).lower()
+            if "rubric" in cls or "kicker" in cls:
+                rubric_text = potential_rubric.get_text(strip=True)
 
-            # --- 去重逻辑：防止 Section 显示两遍 ---
-            # 如果 Rubric 内容和 Section 名字一样，就不再拼接 Rubric
-            clean_sec = current_section.strip()
-            clean_rub = rubric_text.strip()
-            
-            if clean_rub and clean_rub.lower() != clean_sec.lower():
-                header_display = f"{clean_sec} | {clean_rub}"
-            else:
-                header_display = clean_sec
-            
-            fly_title_html = f'<div class="fly-title">{header_display}</div>'
-            
-            # 收集内容
-            content_nodes = [tag]
-            for sib in tag.next_siblings:
-                if getattr(sib, "name", None) in ["h1", "h2"]: break
-                content_nodes.append(sib)
+        # --- 去重逻辑：防止 Section 显示两遍 ---
+        clean_sec = current_section.strip()
+        clean_rub = rubric_text.strip()
+        
+        # 只有当 Rubric 存在 且 不等于 Section 名字时，才拼接
+        if clean_rub and clean_rub.lower() != clean_sec.lower():
+            header_display = f"{clean_sec} | {clean_rub}"
+        else:
+            header_display = clean_sec
+        
+        fly_title_html = f'<div class="fly-title">{header_display}</div>'
+        
+        # 收集正文
+        content_nodes = [h1_tag]
+        for sib in h1_tag.next_siblings:
+            if getattr(sib, "name", None) in ["h1", "h2"]: break
+            content_nodes.append(sib)
 
-            article_html = fly_title_html + "".join(str(x) for x in content_nodes)
-            article_html = re.sub(r'src=["\']([^"\']*?/)?([^/"\']+\.(jpg|jpeg|png|gif|svg|webp))["\']', r'src="../images/\2"', article_html, flags=re.IGNORECASE)
+        article_html = fly_title_html + "".join(str(x) for x in content_nodes)
+        article_html = re.sub(r'src=["\']([^"\']*?/)?([^/"\']+\.(jpg|jpeg|png|gif|svg|webp))["\']', r'src="../images/\2"', article_html, flags=re.IGNORECASE)
 
-            if len(article_html) < 200: continue
-            slug = re.sub(r"[^\w\s-]", "", title).replace(" ", "-").lower()[:80]
-            if os.path.exists(f"output/articles/{slug}.html"): slug = f"{slug}-{len(articles)}"
-            path = f"articles/{slug}.html"
-            write_article(path, article_html, title, css_filename)
-            articles.append({"section": current_section, "title": title, "path": path})
+        if len(article_html) < 200: continue
+        slug = re.sub(r"[^\w\s-]", "", title).replace(" ", "-").lower()[:80]
+        if os.path.exists(f"output/articles/{slug}.html"): slug = f"{slug}-{len(articles)}"
+        path = f"articles/{slug}.html"
+        write_article(path, article_html, title, css_filename)
+        articles.append({"section": current_section, "title": title, "path": path})
 
     return articles, current_section
 
@@ -181,20 +183,19 @@ def write_article(path, html_content, title, css_filename):
 <title>{title}</title>
 {css_link}
 <style>
-    body {{ max-width: 800px; margin: 0 auto; padding: 25px; font-family: Georgia, serif; background-color: #fdfdfd; color: #111; line-height: 1.6; }}
+    body {{ max-width: 800px; margin: 0 auto; padding: 30px 20px; font-family: Georgia, serif; background-color: #fdfdfd; color: #111; line-height: 1.6; }}
     img {{ max-width: 100%; height: auto; display: block; margin: 25px auto; }}
-    /* 页眉样式优化：取消强制大写，保持原文大小写 */
+    /* 严格保持原文大小写，去除 uppercase */
     .fly-title {{ 
-        font-size: 0.9em; 
+        font-size: 0.95em; 
         color: #e3120b; 
         margin-bottom: 15px;
         border-bottom: 1px solid #ddd;
         padding-bottom: 8px;
         font-family: sans-serif;
         font-weight: bold;
-        /* text-transform: uppercase; <--- 已删除，保持原文 */
     }}
-    h1 {{ font-size: 2.2em; line-height: 1.2; margin: 15px 0; }}
+    h1 {{ font-size: 2.2em; line-height: 1.2; margin: 20px 0; color: #000; }}
 </style>
 </head>
 <body class="article">
@@ -213,12 +214,12 @@ def generate_index(articles, edition_date):
 <title>The Economist</title>
 <style>
     body {{ font-family: sans-serif; max-width: 750px; margin: 0 auto; padding: 20px; background-color: #f8f9fa; }}
-    h1 {{ text-align: center; color: #e3120b; font-family: Georgia, serif; margin-bottom: 40px; }}
-    .edition-date {{ display: block; font-size: 0.65em; color: #666; margin-top: 8px; font-weight: normal; }}
-    h2.section-header {{ background: #333; color: #fff; padding: 12px 18px; margin-top: 45px; font-size: 1.15em; border-radius: 4px; }}
-    div.article-link {{ margin: 12px 0; padding: 18px; background: #fff; border-radius: 4px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); border-left: 5px solid transparent; }}
-    div.article-link:hover {{ border-left-color: #e3120b; transform: translateY(-2px); }}
-    a {{ text-decoration: none; color: #111; font-weight: bold; font-size: 1.1em; display: block; }}
+    h1 {{ text-align: center; color: #e3120b; font-family: Georgia, serif; margin-bottom: 40px; font-size: 2.5em; }}
+    .edition-date {{ display: block; font-size: 0.6em; color: #666; margin-top: 10px; font-weight: normal; }}
+    h2.section-header {{ background: #2c2c2c; color: #fff; padding: 12px 15px; margin-top: 50px; font-size: 1.2em; text-transform: uppercase; border-radius: 4px; }}
+    div.article-link {{ margin: 12px 0; padding: 20px; background: #fff; border-radius: 4px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); border-left: 5px solid transparent; }}
+    div.article-link:hover {{ border-left-color: #e3120b; transform: translateY(-2px); box-shadow: 0 4px 10px rgba(0,0,0,0.15); }}
+    a {{ text-decoration: none; color: #111; font-weight: bold; font-size: 1.15em; display: block; }}
 </style>
 </head>
 <body>
