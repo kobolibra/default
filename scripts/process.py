@@ -28,6 +28,7 @@ ALLOWED_SECTIONS = {
 }
 
 def main():
+    # 环境初始化
     shutil.rmtree("temp_epub", ignore_errors=True)
     shutil.rmtree("output", ignore_errors=True)
     os.makedirs("temp_epub", exist_ok=True)
@@ -35,7 +36,10 @@ def main():
     os.makedirs("output/images", exist_ok=True)
     os.makedirs("output/css", exist_ok=True)
 
-    if not os.path.exists(INPUT_EPUB): return
+    if not os.path.exists(INPUT_EPUB): 
+        print(f"Error: {INPUT_EPUB} not found.")
+        return
+
     unzip_epub()
     copy_images()
     css_filename = copy_css()
@@ -54,6 +58,7 @@ def main():
                 articles.append(art)
 
     generate_index(articles, edition_date)
+    print(f"Done. Generated {len(articles)} articles.")
 
 # --------------------------------------------------
 # 基础功能 (保持稳定)
@@ -110,7 +115,7 @@ def extract_edition_date(base_dir, ordered_files):
     return ""
 
 # --------------------------------------------------
-# 核心修改：基于你的分析重构的解析逻辑
+# 针对性重构：核心解析逻辑
 # --------------------------------------------------
 
 def parse_html_file(filepath, current_section, css_filename):
@@ -120,61 +125,91 @@ def parse_html_file(filepath, current_section, css_filename):
     if not body: return [], current_section
 
     articles = []
-    last_found_rubric = ""
+    last_found_rubric = "" # 缓存副标题
 
-    # 遍历所有标签
+    # 按照文档流遍历所有标签
     for tag in body.find_all(True):
-        # 获取 class 列表并标准化
-        cls_raw = tag.get("class", [])
-        if isinstance(cls_raw, str): cls_raw = [cls_raw]
-        cls = " ".join(cls_raw).lower()
+        # 获取 class 字符串
+        cls_list = tag.get("class", [])
+        if isinstance(cls_list, str): cls_list = [cls_list]
+        cls = " ".join(cls_list).lower()
         
-        # 1. 识别 Section 板块名
-        # 特征：h2 且 class 包含 section/department/part，且不在 article 容器内
-        if tag.name == "h2" and ("section" in cls or "department" in cls or "part" in cls):
+        # 1. 识别 Section (板块名)
+        # 根据分析：除了 class 匹配，增加全大写/短文本判断
+        is_section = False
+        if tag.name == "h2":
             txt = tag.get_text(strip=True)
-            if txt and len(txt) < 50:
-                current_section = txt
+            # 条件：包含 section 相关类名，或者 (长度短 且 全大写)
+            if any(x in cls for x in ["section", "department", "part", "header"]):
+                is_section = True
+            elif txt and len(txt) < 30 and txt.isupper():
+                is_section = True
+                
+        if is_section:
+            current_section = tag.get_text(strip=True)
+            last_found_rubric = "" # 遇到新板块，清空旧副标题
             continue
 
-        # 2. 识别 Rubric/Kicker (页眉后面那部分)
-        # 特征：类名包含 rubric/kicker，或者是一个不带 section 类的 h2
-        if ("rubric" in cls or "kicker" in cls or 
-            (tag.name == "h2" and "section" not in cls and "part" not in cls)):
+        # 2. 识别 Rubric/Kicker (页眉描述部分)
+        # 增加 subhead, deck, teaser, flytitle, kicker 等常见类名匹配
+        is_rubric = any(x in cls for x in ["rubric", "kicker", "teaser", "flytitle", "deck", "subhead"])
+        # 备选判断：如果是一个不带 section 类的 h2 且在板块内，也可能是副标题
+        if not is_rubric and tag.name == "h2":
             txt = tag.get_text(strip=True)
-            if txt and len(txt) < 100:
-                last_found_rubric = txt
+            if txt and (len(txt) < 100 or "|" in txt):
+                is_rubric = True
+                
+        if is_rubric:
+            last_found_rubric = tag.get_text(strip=True)
             continue
 
-        # 3. 捕捉文章主标题 h1
+        # 3. 捕捉到文章主标题 h1
         if tag.name == "h1":
             title = tag.get_text(strip=True)
             if not title: continue
 
-            # --- 核心逻辑：组装 Fly-title 并去重 ---
+            # --- 按照分析建议改进的去重逻辑 ---
             clean_sec = current_section.strip()
             clean_rub = last_found_rubric.strip()
             
-            # 情况 A: Rubric 已经包含了 Section 名 (例如 "By Invitation | ...")
-            if clean_rub.lower().startswith(clean_sec.lower()):
-                header_display = clean_rub
-            # 情况 B: Rubric 是独立的内容且不等于 Section 名
-            elif clean_rub and clean_rub.lower() != clean_sec.lower():
-                header_display = f"{clean_sec} | {clean_rub}"
-            # 情况 C: 没有 Rubric 或 Rubric 重复了 Section
+            if clean_rub:
+                # 检查 Rubric 是否已经包含管道符
+                if "|" in clean_rub:
+                    rub_parts = [p.strip() for p in clean_rub.split("|", 1)]
+                    if rub_parts[0].lower() == clean_sec.lower():
+                        # Rubric 已经是 "Section | Something" 格式，直接使用
+                        header_display = clean_rub
+                    else:
+                        # 包含 | 但前面不是当前 section，进行组合
+                        header_display = f"{clean_sec} | {clean_rub}"
+                elif clean_rub.lower().startswith(clean_sec.lower()):
+                    # Rubric 以 Section 开头 (如 "Leaders ...")
+                    header_display = clean_rub
+                elif clean_rub.lower() != clean_sec.lower():
+                    # 组合显示
+                    header_display = f"{clean_sec} | {clean_rub}"
+                else:
+                    # 相等，只用 Section
+                    header_display = clean_sec
             else:
                 header_display = clean_sec
 
             fly_title_html = f'<div class="fly-title">{header_display}</div>'
             
-            # 收集正文内容
+            # 收集正文内容 (直到下一个 h1 或 h2)
             content_nodes = [tag]
             for sib in tag.next_siblings:
                 if getattr(sib, "name", None) in ["h1", "h2"]: break
                 content_nodes.append(sib)
 
             article_html = fly_title_html + "".join(str(x) for x in content_nodes)
-            article_html = re.sub(r'src=["\']([^"\']*?/)?([^/"\']+\.(jpg|jpeg|png|gif|svg|webp))["\']', r'src="../images/\2"', article_html, flags=re.IGNORECASE)
+            # 修复图片路径
+            article_html = re.sub(
+                r'src=["\']([^"\']*?/)?([^/"\']+\.(jpg|jpeg|png|gif|svg|webp))["\']', 
+                r'src="../images/\2"', 
+                article_html, 
+                flags=re.IGNORECASE
+            )
 
             if len(article_html) < 200: continue
             
@@ -185,7 +220,7 @@ def parse_html_file(filepath, current_section, css_filename):
             write_article(path, article_html, title, css_filename)
             articles.append({"section": current_section, "title": title, "path": path})
             
-            # 处理完文章，重置 rubric 防止干扰下一篇
+            # 处理完文章，重置副标题
             last_found_rubric = ""
 
     return articles, current_section
@@ -202,7 +237,6 @@ def write_article(path, html_content, title, css_filename):
 <style>
     body {{ max-width: 800px; margin: 0 auto; padding: 30px 20px; font-family: Georgia, serif; background-color: #fdfdfd; color: #111; line-height: 1.6; }}
     img {{ max-width: 100%; height: auto; display: block; margin: 25px auto; }}
-    /* 页眉保持原文大小写 */
     .fly-title {{ 
         font-size: 0.95em; 
         color: #e3120b; 
