@@ -53,16 +53,15 @@ def main():
     print("Parsing reading order...")
     ordered_files = get_reading_order("temp_epub")
     
-    # --- 新增功能：提取日期 ---
+    # 5. 提取日期
     print("Extracting edition date...")
     edition_date = extract_edition_date("temp_epub", ordered_files)
     print(f"Edition Date found: {edition_date}")
-    # -----------------------
 
     articles = []
     current_section = "Unknown" 
 
-    # 5. 解析 HTML
+    # 6. 解析 HTML
     print(f"Processing {len(ordered_files)} files...")
     for html_file in ordered_files:
         full_path = os.path.join("temp_epub", html_file)
@@ -76,7 +75,7 @@ def main():
             if sec_norm in ALLOWED_SECTIONS:
                 articles.append(art)
 
-    # 6. 生成索引 (传入日期)
+    # 7. 生成索引
     generate_index(articles, edition_date)
 
     print(f"Done. Generated {len(articles)} articles.")
@@ -153,36 +152,24 @@ def get_reading_order(base_dir):
         print(f"Error parsing OPF: {e}")
         return []
 
-# --- 新增函数：日期提取 ---
 def extract_edition_date(base_dir, ordered_files):
-    """
-    尝试从前 5 个文件中提取日期（格式如 February 7th 2026）
-    """
-    # 匹配月份+日+年的正则
     date_pattern = re.compile(
         r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(?:st|nd|rd|th)?\s+20\d{2}',
         re.IGNORECASE
     )
-    
-    # 只检查前5个文件，通常日期在封面或版权页
     for fname in ordered_files[:5]:
         path = os.path.join(base_dir, fname)
         if not os.path.exists(path): continue
-        
         try:
             with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-                # 获取纯文本进行匹配
                 soup = BeautifulSoup(f.read(), "html.parser")
                 text = soup.get_text(" ", strip=True)
                 match = date_pattern.search(text)
                 if match:
-                    return match.group(0) # 返回匹配到的完整日期字符串
+                    return match.group(0)
         except:
             continue
-            
-    return "" # 没找到则返回空字符串
-
-# -----------------------
+    return ""
 
 def parse_html_file(filepath, current_section, css_filename):
     with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
@@ -207,12 +194,18 @@ def parse_html_file(filepath, current_section, css_filename):
             title = tag.get_text(strip=True)
             if not title: continue
 
+            # --- 核心修改：构造组合标题页眉 ---
+            fly_title_html = f'<div class="fly-title">{current_section} | {title}</div>'
+            
             content_nodes = [tag]
             for sib in tag.next_siblings:
                 if getattr(sib, "name", None) in ["h1", "h2"]: break
                 content_nodes.append(sib)
 
-            article_html = "".join(str(x) for x in content_nodes)
+            # 将组合标题拼在文章正文的最前面
+            article_html = fly_title_html + "".join(str(x) for x in content_nodes)
+            # -------------------------------
+
             article_html = re.sub(
                 r'src=["\']([^"\']*?/)?([^/"\']+\.(jpg|jpeg|png|gif|svg|webp))["\']',
                 r'src="../images/\2"',
@@ -256,6 +249,7 @@ def write_article(path, html_content, title, css_filename):
         font-family: Georgia, serif;
         background-color: #fdfdfd;
         color: #111;
+        line-height: 1.6;
     }}
     img {{
         max-width: 100%;
@@ -263,12 +257,18 @@ def write_article(path, html_content, title, css_filename):
         display: block;
         margin: 20px auto;
     }}
+    /* 针对组合标题的样式完善 */
     .fly-title {{ 
         text-transform: uppercase; 
-        font-size: 0.8em; 
+        font-size: 0.85em; 
         color: #e3120b; 
-        margin-bottom: 5px;
+        margin-bottom: 10px;
+        border-bottom: 1px solid #eee;
+        padding-bottom: 5px;
         display: block;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        font-weight: bold;
+        letter-spacing: 0.05em;
     }}
 </style>
 </head>
@@ -283,7 +283,6 @@ def write_article(path, html_content, title, css_filename):
         f.write(html)
 
 
-# --- 修改功能：生成索引页（日期显示 + 样式优化） ---
 def generate_index(articles, edition_date):
     date_html = f'<span class="edition-date">{edition_date}</span>' if edition_date else ""
     
@@ -299,10 +298,8 @@ def generate_index(articles, edition_date):
         max-width: 800px; 
         margin: 0 auto; 
         padding: 20px; 
-        background-color: #f8f9fa; /* 背景调亮一点 */
+        background-color: #f8f9fa;
     }}
-    
-    /* 标题样式：包含日期 */
     h1 {{ 
         text-align: center; 
         color: #e3120b; 
@@ -318,42 +315,37 @@ def generate_index(articles, edition_date):
         font-weight: normal;
         font-family: sans-serif;
     }}
-
-    /* Section 样式优化：增加背景色，使其像一个通栏标题 */
     h2.section-header {{ 
-        background-color: #333; /* 深色背景 */
-        color: #fff;            /* 白色文字 */
-        padding: 8px 15px;      /* 增加内边距 */
+        background-color: #2c2c2c; 
+        color: #fff;            
+        padding: 10px 15px;      
         margin-top: 50px; 
         margin-bottom: 15px;
-        font-size: 1.3em;       /* 稍微加大 */
+        font-size: 1.25em;       
         text-transform: uppercase; 
         letter-spacing: 0.05em;
-        border-radius: 4px;     /* 圆角 */
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        border-radius: 4px;     
+        box-shadow: 0 2px 4px rgba(0,0,0,0.15);
     }}
-    
-    /* 文章链接样式 */
     div.article-link {{ 
         margin: 10px 0; 
-        padding: 15px; 
+        padding: 18px; 
         background: white; 
         border-radius: 4px; 
         box-shadow: 0 1px 2px rgba(0,0,0,0.05); 
-        transition: transform 0.1s;
-        border-left: 4px solid transparent; /* 预留左侧边框位置 */
+        transition: transform 0.1s, box-shadow 0.1s;
+        border-left: 4px solid transparent; 
     }}
     div.article-link:hover {{ 
         transform: translateY(-2px); 
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1); 
-        border-left: 4px solid #e3120b; /* 悬停时显示红色左边框 */
+        box-shadow: 0 4px 8px rgba(0,0,0,0.1); 
+        border-left: 4px solid #e3120b; 
     }}
-    
     a {{ 
         text-decoration: none; 
         color: #1a1a1a; 
         font-weight: bold; 
-        font-size: 1.05em; /* 稍微调整，与 Section 区分 */
+        font-size: 1.1em; 
         display: block; 
     }}
     a:hover {{ color: #e3120b; }}
@@ -364,19 +356,14 @@ def generate_index(articles, edition_date):
 """
 
     current_section = None
-
     for a in articles:
         if a["section"] != current_section:
             current_section = a["section"]
             html += f'<h2 class="section-header">{current_section}</h2>'
-
         html += f'<div class="article-link"><a href="{a["path"]}">{a["title"]}</a></div>'
-
     html += "</body></html>"
-
     with open("output/index.html", "w", encoding="utf-8") as f:
         f.write(html)
-# -----------------------
 
 if __name__ == "__main__":
     main()
