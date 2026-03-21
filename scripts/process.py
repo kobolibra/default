@@ -60,11 +60,11 @@ def main():
     generate_index(articles, edition_date)
     print(f"✅ Done. Generated {len(articles)} articles.")
     
-    # 触发上传
+    # 执行上传
     upload_to_nextcloud(INPUT_EPUB, edition_date)
 
 # --------------------------------------------------
-# 针对性修复：Nextcloud 上传路径逻辑
+# 最终修复版：Nextcloud 上传模块
 # --------------------------------------------------
 def upload_to_nextcloud(local_file, edition_date):
     nc_url = os.getenv("NC_URL")
@@ -72,7 +72,7 @@ def upload_to_nextcloud(local_file, edition_date):
     nc_pass = os.getenv("NC_PASS")
 
     if not all([nc_url, nc_user, nc_pass]):
-        print("⚠️ Warning: Nextcloud Secrets are missing.")
+        print("⚠️ Warning: Nextcloud Secrets missing.")
         return
 
     try:
@@ -81,42 +81,44 @@ def upload_to_nextcloud(local_file, edition_date):
         print("❌ Error: webdavclient3 not installed.")
         return
 
-    # 规范化 WebDAV 基础 URL
-    if not nc_url.endswith('/'):
-        nc_url += '/'
-
-    print(f"🚀 Connecting to: {nc_url}")
+    # 1. 极其严格的 URL 处理：去掉末尾斜杠，由库自己处理拼接
+    base_url = nc_url.strip().rstrip('/')
     
-    # 修复点 1：显式分离 URL 和 路径
-    client = Client({
-        'webdav_url': nc_url,
+    options = {
+        'webdav_url': base_url,
         'webdav_username': nc_user,
         'webdav_password': nc_pass
-    })
+    }
+    
+    print(f"🚀 Connecting to WebDAV: {base_url}")
+    client = Client(options)
 
-    # 清洗日期
+    # 2. 文件名处理
     clean_date = re.sub(r'[^\w\s-]', '', edition_date).replace(' ', '_') if edition_date else "latest"
     remote_file_name = f"The_Economist_{clean_date}.epub"
     
-    # 修复点 2：在路径前显式加上斜杠，强制 webdavclient 识别为相对路径
-    folder_path = "Economist/"
-    remote_full_path = f"Economist/{remote_file_name}"
+    # 3. 路径策略：webdavclient3 在 check/mkdir 时不应带前导斜杠
+    target_dir = "Economist"
+    remote_path = f"{target_dir}/{remote_file_name}"
 
     try:
-        # 检查文件夹
-        if not client.check("Economist"):
-            print(f"📁 Creating folder: Economist")
-            client.mkdir("Economist")
+        # 强制检查文件夹是否存在
+        print(f"🔍 Checking folder: {target_dir}")
+        if not client.check(target_dir):
+            print(f"📁 Creating folder: {target_dir}")
+            client.mkdir(target_dir)
         
-        print(f"📤 Uploading to: {remote_full_path}")
-        # 修复点 3：使用 upload_file 明确上传意图
-        client.upload_file(remote_path=remote_full_path, local_path=local_file)
-        print(f"✅ Successfully uploaded: {remote_full_path}")
+        # 核心修复：使用 upload_file 替代 upload_sync，并确保路径格式
+        print(f"📤 Uploading to: {remote_path}")
+        client.upload_file(remote_path=remote_path, local_path=local_file)
+        print(f"✅ Successfully uploaded to Nextcloud!")
+        
     except Exception as e:
         print(f"❌ Nextcloud Upload Failed: {str(e)}")
+        print("💡 Hint: Please verify your NC_URL includes '/remote.php/dav/files/USER/'")
 
 # --------------------------------------------------
-# 基础功能 (保持不变)
+# 基础功能（保持原样）
 # --------------------------------------------------
 
 def unzip_epub():
