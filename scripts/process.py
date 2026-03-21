@@ -60,11 +60,11 @@ def main():
     generate_index(articles, edition_date)
     print(f"Done. Generated {len(articles)} articles.")
     
-    # --- 新增功能：上传到 Nextcloud ---
+    # --- 核心修改：上传到 Nextcloud 的 Economist 文件夹 ---
     upload_to_nextcloud(INPUT_EPUB, edition_date)
 
 # --------------------------------------------------
-# 新增功能：Nextcloud 上传模块
+# 针对性完善：Nextcloud 上传模块
 # --------------------------------------------------
 def upload_to_nextcloud(local_file, edition_date):
     nc_url = os.getenv("NC_URL")
@@ -88,18 +88,27 @@ def upload_to_nextcloud(local_file, edition_date):
         'webdav_password': nc_pass
     })
 
-    # 格式化远程文件名，包含日期以便识别
+    # 1. 定义文件夹和文件名
+    folder_name = "Economist"
+    # 清洗日期字符串作为文件名：例如 "The_Economist_2024_03_21.epub"
     clean_date = re.sub(r'[^\w\s-]', '', edition_date).replace(' ', '_') if edition_date else "latest"
-    remote_path = f"The_Economist_{clean_date}.epub"
+    remote_file_name = f"The_Economist_{clean_date}.epub"
+    remote_full_path = f"{folder_name}/{remote_file_name}"
 
     try:
-        client.upload_sync(remote_path=remote_path, local_path=local_file)
-        print(f"Successfully uploaded: {remote_path}")
+        # 2. 检查并创建文件夹（如果不存在）
+        if not client.check(folder_name):
+            print(f"Creating directory: {folder_name}")
+            client.mkdir(folder_name)
+        
+        # 3. 执行同步上传
+        client.upload_sync(remote_path=remote_full_path, local_path=local_file)
+        print(f"Successfully uploaded to: {remote_full_path}")
     except Exception as e:
-        print(f"Upload failed: {e}")
+        print(f"Nextcloud Upload Failed: {e}")
 
 # --------------------------------------------------
-# 基础功能 (保持稳定)
+# 基础功能 (保持原样，未做改动)
 # --------------------------------------------------
 
 def unzip_epub():
