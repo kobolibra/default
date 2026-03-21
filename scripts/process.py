@@ -4,9 +4,10 @@ import shutil
 import re
 import xml.etree.ElementTree as ET
 from bs4 import BeautifulSoup
+import requests  # 必须确保基础环境有 requests
 
 # --------------------------------------------------
-# 配置与常量
+# 配置与常量 (保持你的原始设置)
 # --------------------------------------------------
 
 INPUT_EPUB = "input/economist.epub"
@@ -60,11 +61,11 @@ def main():
     generate_index(articles, edition_date)
     print(f"✅ Done. Generated {len(articles)} articles.")
     
-    # 执行上传
+    # 针对性修改：触发新的上传逻辑
     upload_to_nextcloud(INPUT_EPUB, edition_date)
 
 # --------------------------------------------------
-# 最终修复版：Nextcloud 上传模块
+# 核心针对性修改：彻底解决 Invalid URL 报错
 # --------------------------------------------------
 def upload_to_nextcloud(local_file, edition_date):
     nc_url = os.getenv("NC_URL")
@@ -72,53 +73,53 @@ def upload_to_nextcloud(local_file, edition_date):
     nc_pass = os.getenv("NC_PASS")
 
     if not all([nc_url, nc_user, nc_pass]):
-        print("⚠️ Warning: Nextcloud Secrets missing.")
+        print("⚠️ Warning: Nextcloud Secrets are missing.")
         return
 
-    try:
-        from webdav3.client import Client
-    except ImportError:
-        print("❌ Error: webdavclient3 not installed.")
-        return
-
-    # 1. 极其严格的 URL 处理：去掉末尾斜杠，由库自己处理拼接
+    # 规范化 URL 格式
     base_url = nc_url.strip().rstrip('/')
     
-    options = {
-        'webdav_url': base_url,
-        'webdav_username': nc_user,
-        'webdav_password': nc_pass
-    }
-    
-    print(f"🚀 Connecting to WebDAV: {base_url}")
-    client = Client(options)
-
-    # 2. 文件名处理
+    # 清洗日期用于命名
     clean_date = re.sub(r'[^\w\s-]', '', edition_date).replace(' ', '_') if edition_date else "latest"
     remote_file_name = f"The_Economist_{clean_date}.epub"
     
-    # 3. 路径策略：webdavclient3 在 check/mkdir 时不应带前导斜杠
-    target_dir = "Economist"
-    remote_path = f"{target_dir}/{remote_file_name}"
+    # 关键点：手动拼接完整 URL，避开 webdav 库的路径解析 Bug
+    # 我们直接尝试上传到 Economist 文件夹下
+    target_url = f"{base_url}/Economist/{remote_file_name}"
+    
+    print(f"🚀 Attempting direct upload to: {target_url}")
 
     try:
-        # 强制检查文件夹是否存在
-        print(f"🔍 Checking folder: {target_dir}")
-        if not client.check(target_dir):
-            print(f"📁 Creating folder: {target_dir}")
-            client.mkdir(target_dir)
+        with open(local_file, 'rb') as f:
+            # 使用 HTTP PUT 协议直接上传，这是 WebDAV 的底层原理
+            response = requests.put(
+                target_url, 
+                data=f, 
+                auth=(nc_user, nc_pass),
+                timeout=120
+            )
         
-        # 核心修复：使用 upload_file 替代 upload_sync，并确保路径格式
-        print(f"📤 Uploading to: {remote_path}")
-        client.upload_file(remote_path=remote_path, local_path=local_file)
-        print(f"✅ Successfully uploaded to Nextcloud!")
-        
+        # 201 Created 或 204 No Content 代表成功
+        if response.status_code in [201, 204]:
+            print(f"✅ Successfully uploaded to Nextcloud!")
+        elif response.status_code == 404:
+            print("⚠️ Folder 'Economist' not found. Trying root directory...")
+            fallback_url = f"{base_url}/{remote_file_name}"
+            with open(local_file, 'rb') as f:
+                fb_res = requests.put(fallback_url, data=f, auth=(nc_user, nc_pass))
+            if fb_res.status_code in [201, 204]:
+                print(f"✅ Success! Uploaded to root directory.")
+            else:
+                print(f"❌ Fallback failed. Code: {fb_res.status_code}")
+        else:
+            print(f"❌ Upload Failed. Status Code: {response.status_code}")
+            print(f"📝 Response Text: {response.text}")
+            
     except Exception as e:
-        print(f"❌ Nextcloud Upload Failed: {str(e)}")
-        print("💡 Hint: Please verify your NC_URL includes '/remote.php/dav/files/USER/'")
+        print(f"❌ Network/Request Error: {str(e)}")
 
 # --------------------------------------------------
-# 基础功能（保持原样）
+# 基础解析功能 (完全保留你的原始代码)
 # --------------------------------------------------
 
 def unzip_epub():
