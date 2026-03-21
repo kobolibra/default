@@ -27,7 +27,8 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install beautifulsoup4 lxml requests
+        # 针对性修改：增加了 webdavclient3 库的安装
+        run: pip install beautifulsoup4 lxml requests webdavclient3
 
       - name: Find latest issue and download
         run: |
@@ -61,14 +62,17 @@ jobs:
           # 检查是否为有效 ZIP
           if ! unzip -t input/economist.epub > /dev/null 2>&1; then
             echo "Error: Not a valid ZIP file"
-            echo "First 500 bytes:"
-            head -c 500 input/economist.epub
             exit 1
           fi
           
           echo "Downloaded and verified successfully"
 
       - name: Process EPUB
+        # 针对性修改：通过 env 注入 GitHub Secrets，使 Python 脚本能够读取到 Nextcloud 配置
+        env:
+          NC_URL: ${{ secrets.NC_URL }}
+          NC_USER: ${{ secrets.NC_USER }}
+          NC_PASS: ${{ secrets.NC_PASS }}
         run: python scripts/process.py
 
       - name: Setup Pages
