@@ -60,11 +60,11 @@ def main():
     generate_index(articles, edition_date)
     print(f"✅ Done. Generated {len(articles)} articles.")
     
-    # 触发上传逻辑
+    # 触发上传
     upload_to_nextcloud(INPUT_EPUB, edition_date)
 
 # --------------------------------------------------
-# 核心修复：Nextcloud 上传模块
+# 针对性修复：Nextcloud 上传路径逻辑
 # --------------------------------------------------
 def upload_to_nextcloud(local_file, edition_date):
     nc_url = os.getenv("NC_URL")
@@ -81,39 +81,42 @@ def upload_to_nextcloud(local_file, edition_date):
         print("❌ Error: webdavclient3 not installed.")
         return
 
-    # 规范化 URL 格式
+    # 规范化 WebDAV 基础 URL
     if not nc_url.endswith('/'):
         nc_url += '/'
 
-    print(f"🚀 Attempting to connect to Nextcloud: {nc_url}")
+    print(f"🚀 Connecting to: {nc_url}")
+    
+    # 修复点 1：显式分离 URL 和 路径
     client = Client({
         'webdav_url': nc_url,
         'webdav_username': nc_user,
         'webdav_password': nc_pass
     })
 
-    # 清洗日期用于命名
+    # 清洗日期
     clean_date = re.sub(r'[^\w\s-]', '', edition_date).replace(' ', '_') if edition_date else "latest"
     remote_file_name = f"The_Economist_{clean_date}.epub"
-    folder_name = "Economist"
+    
+    # 修复点 2：在路径前显式加上斜杠，强制 webdavclient 识别为相对路径
+    folder_path = "Economist/"
+    remote_full_path = f"Economist/{remote_file_name}"
 
     try:
-        # 先检查文件夹，不存在则创建
-        if not client.check(folder_name):
-            print(f"📁 Creating folder: {folder_name}")
-            client.mkdir(folder_name)
+        # 检查文件夹
+        if not client.check("Economist"):
+            print(f"📁 Creating folder: Economist")
+            client.mkdir("Economist")
         
-        # 修复：直接传递相对于 WebDAV 根目录的路径
-        remote_path = f"{folder_name}/{remote_file_name}"
-        print(f"📤 Uploading: {local_file} -> {remote_path}")
-        
-        client.upload_sync(remote_path=remote_path, local_path=local_file)
-        print(f"✅ Successfully uploaded to Nextcloud: {remote_path}")
+        print(f"📤 Uploading to: {remote_full_path}")
+        # 修复点 3：使用 upload_file 明确上传意图
+        client.upload_file(remote_path=remote_full_path, local_path=local_file)
+        print(f"✅ Successfully uploaded: {remote_full_path}")
     except Exception as e:
         print(f"❌ Nextcloud Upload Failed: {str(e)}")
 
 # --------------------------------------------------
-# 基础功能 (保持原样)
+# 基础功能 (保持不变)
 # --------------------------------------------------
 
 def unzip_epub():
