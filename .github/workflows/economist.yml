@@ -14,6 +14,10 @@ concurrency:
   group: "pages"
   cancel-in-progress: false
 
+# 强制所有 Action 使用 Node.js 24 以消除警告
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -27,48 +31,24 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        # 针对性修改：增加了 webdavclient3 库的安装
         run: pip install beautifulsoup4 lxml requests webdavclient3
 
       - name: Find latest issue and download
         run: |
           mkdir -p input
-          
-          # 获取最新文件夹（格式：te_YYYY.MM.DD）
           LATEST_FOLDER=$(curl -s "https://api.github.com/repos/hehonghui/awesome-english-ebooks/contents/01_economist?ref=master" | \
             python3 -c "import sys, json; folders=[i['name'] for i in json.load(sys.stdin) if i['type']=='dir' and i['name'].startswith('te_')]; print(sorted(folders)[-1])")
-          
-          echo "Latest folder: $LATEST_FOLDER"
-          
-          # 从文件夹名提取日期（te_2026.02.07 → 2026.02.07）
+          echo "Found latest: $LATEST_FOLDER"
           DATE_PART=$(echo "$LATEST_FOLDER" | sed 's/te_//')
-          echo "Date part: $DATE_PART"
-          
-          # 构建文件名：TheEconomist.YYYY.MM.DD.epub
           FILENAME="TheEconomist.${DATE_PART}.epub"
-          echo "Filename: $FILENAME"
-          
-          # 构建下载链接
           DOWNLOAD_URL="https://raw.githubusercontent.com/hehonghui/awesome-english-ebooks/master/01_economist/${LATEST_FOLDER}/${FILENAME}"
-          echo "Download URL: $DOWNLOAD_URL"
-          
-          # 下载
           curl -L --fail -o input/economist.epub "$DOWNLOAD_URL"
-          
-          # 验证
-          echo "File size:"
-          ls -lh input/economist.epub
-          
-          # 检查是否为有效 ZIP
           if ! unzip -t input/economist.epub > /dev/null 2>&1; then
-            echo "Error: Not a valid ZIP file"
+            echo "Error: Not a valid EPUB file"
             exit 1
           fi
-          
-          echo "Downloaded and verified successfully"
 
       - name: Process EPUB
-        # 针对性修改：通过 env 注入 GitHub Secrets，使 Python 脚本能够读取到 Nextcloud 配置
         env:
           NC_URL: ${{ secrets.NC_URL }}
           NC_USER: ${{ secrets.NC_USER }}
@@ -89,6 +69,8 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     needs: build
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
