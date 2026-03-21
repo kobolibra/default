@@ -59,6 +59,44 @@ def main():
 
     generate_index(articles, edition_date)
     print(f"Done. Generated {len(articles)} articles.")
+    
+    # --- 新增功能：上传到 Nextcloud ---
+    upload_to_nextcloud(INPUT_EPUB, edition_date)
+
+# --------------------------------------------------
+# 新增功能：Nextcloud 上传模块
+# --------------------------------------------------
+def upload_to_nextcloud(local_file, edition_date):
+    nc_url = os.getenv("NC_URL")
+    nc_user = os.getenv("NC_USER")
+    nc_pass = os.getenv("NC_PASS")
+
+    if not all([nc_url, nc_user, nc_pass]):
+        print("Nextcloud credentials not set. Skipping upload.")
+        return
+
+    try:
+        from webdav3.client import Client
+    except ImportError:
+        print("webdavclient3 not installed. Skipping upload.")
+        return
+
+    print("Starting upload to Nextcloud...")
+    client = Client({
+        'webdav_url': nc_url,
+        'webdav_username': nc_user,
+        'webdav_password': nc_pass
+    })
+
+    # 格式化远程文件名，包含日期以便识别
+    clean_date = re.sub(r'[^\w\s-]', '', edition_date).replace(' ', '_') if edition_date else "latest"
+    remote_path = f"The_Economist_{clean_date}.epub"
+
+    try:
+        client.upload_sync(remote_path=remote_path, local_path=local_file)
+        print(f"Successfully uploaded: {remote_path}")
+    except Exception as e:
+        print(f"Upload failed: {e}")
 
 # --------------------------------------------------
 # 基础功能 (保持稳定)
@@ -114,10 +152,6 @@ def extract_edition_date(base_dir, ordered_files):
         except: continue
     return ""
 
-# --------------------------------------------------
-# 针对性重构：核心解析逻辑
-# --------------------------------------------------
-
 def parse_html_file(filepath, current_section, css_filename):
     with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
         soup = BeautifulSoup(f.read(), "html.parser")
@@ -125,21 +159,16 @@ def parse_html_file(filepath, current_section, css_filename):
     if not body: return [], current_section
 
     articles = []
-    last_found_rubric = "" # 缓存副标题
+    last_found_rubric = "" 
 
-    # 按照文档流遍历所有标签
     for tag in body.find_all(True):
-        # 获取 class 字符串
         cls_list = tag.get("class", [])
         if isinstance(cls_list, str): cls_list = [cls_list]
         cls = " ".join(cls_list).lower()
         
-        # 1. 识别 Section (板块名)
-        # 根据分析：除了 class 匹配，增加全大写/短文本判断
         is_section = False
         if tag.name == "h2":
             txt = tag.get_text(strip=True)
-            # 条件：包含 section 相关类名，或者 (长度短 且 全大写)
             if any(x in cls for x in ["section", "department", "part", "header"]):
                 is_section = True
             elif txt and len(txt) < 30 and txt.isupper():
@@ -147,13 +176,10 @@ def parse_html_file(filepath, current_section, css_filename):
                 
         if is_section:
             current_section = tag.get_text(strip=True)
-            last_found_rubric = "" # 遇到新板块，清空旧副标题
+            last_found_rubric = "" 
             continue
 
-        # 2. 识别 Rubric/Kicker (页眉描述部分)
-        # 增加 subhead, deck, teaser, flytitle, kicker 等常见类名匹配
         is_rubric = any(x in cls for x in ["rubric", "kicker", "teaser", "flytitle", "deck", "subhead"])
-        # 备选判断：如果是一个不带 section 类的 h2 且在板块内，也可能是副标题
         if not is_rubric and tag.name == "h2":
             txt = tag.get_text(strip=True)
             if txt and (len(txt) < 100 or "|" in txt):
@@ -163,47 +189,37 @@ def parse_html_file(filepath, current_section, css_filename):
             last_found_rubric = tag.get_text(strip=True)
             continue
 
-        # 3. 捕捉到文章主标题 h1
         if tag.name == "h1":
             title = tag.get_text(strip=True)
             if not title: continue
 
-            # --- 按照分析建议改进的去重逻辑 ---
             clean_sec = current_section.strip()
             clean_rub = last_found_rubric.strip()
             
             if clean_rub:
-                # 检查 Rubric 是否已经包含管道符
                 if "|" in clean_rub:
                     rub_parts = [p.strip() for p in clean_rub.split("|", 1)]
                     if rub_parts[0].lower() == clean_sec.lower():
-                        # Rubric 已经是 "Section | Something" 格式，直接使用
                         header_display = clean_rub
                     else:
-                        # 包含 | 但前面不是当前 section，进行组合
                         header_display = f"{clean_sec} | {clean_rub}"
                 elif clean_rub.lower().startswith(clean_sec.lower()):
-                    # Rubric 以 Section 开头 (如 "Leaders ...")
                     header_display = clean_rub
                 elif clean_rub.lower() != clean_sec.lower():
-                    # 组合显示
                     header_display = f"{clean_sec} | {clean_rub}"
                 else:
-                    # 相等，只用 Section
                     header_display = clean_sec
             else:
                 header_display = clean_sec
 
             fly_title_html = f'<div class="fly-title">{header_display}</div>'
             
-            # 收集正文内容 (直到下一个 h1 或 h2)
             content_nodes = [tag]
             for sib in tag.next_siblings:
                 if getattr(sib, "name", None) in ["h1", "h2"]: break
                 content_nodes.append(sib)
 
             article_html = fly_title_html + "".join(str(x) for x in content_nodes)
-            # 修复图片路径
             article_html = re.sub(
                 r'src=["\']([^"\']*?/)?([^/"\']+\.(jpg|jpeg|png|gif|svg|webp))["\']', 
                 r'src="../images/\2"', 
@@ -219,8 +235,6 @@ def parse_html_file(filepath, current_section, css_filename):
             
             write_article(path, article_html, title, css_filename)
             articles.append({"section": current_section, "title": title, "path": path})
-            
-            # 处理完文章，重置副标题
             last_found_rubric = ""
 
     return articles, current_section
