@@ -4,7 +4,7 @@ import shutil
 import re
 import xml.etree.ElementTree as ET
 from bs4 import BeautifulSoup
-import requests  # 必须确保基础环境有 requests
+import requests
 
 # --------------------------------------------------
 # 配置与常量 (保持你的原始设置)
@@ -41,7 +41,16 @@ def main():
         print(f"Error: {INPUT_EPUB} not found.")
         return
 
+    # 1. 解压 EPUB
     unzip_epub()
+
+    # 2. 【新增针对性修改】删除广告页逻辑
+    remove_ads_from_epub("temp_epub")
+
+    # 3. 【新增针对性修改】重新打包干净的 EPUB 覆盖原文件，供后续推送
+    repack_epub("temp_epub", INPUT_EPUB)
+
+    # 4. 后续生成网页逻辑 (保持原样)
     copy_images()
     css_filename = copy_css()
     ordered_files = get_reading_order("temp_epub")
@@ -61,12 +70,89 @@ def main():
     generate_index(articles, edition_date)
     print(f"✅ Done. Generated {len(articles)} articles.")
     
-    # 针对性修改：触发新的上传逻辑
+    # 5. 上传推送 (现在推送的是 repack 后的干净 EPUB)
     upload_to_nextcloud(INPUT_EPUB, edition_date)
 
 # --------------------------------------------------
-# 核心针对性修改：彻底解决 Invalid URL 报错
+# 新增功能：广告页清洗与重新打包
 # --------------------------------------------------
+
+def remove_ads_from_epub(base_dir):
+    """扫描并删除包含广告关键词的 HTML 页面"""
+    print("🛡️ Scanning for ad pages...")
+    removed_any = False
+    for root, _, files in os.walk(base_dir):
+        for f in files:
+            if f.lower().endswith((".html", ".xhtml")):
+                file_path = os.path.join(root, f)
+                try:
+                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as fr:
+                        content = fr.read()
+                        # 针对性匹配“优质App推荐”
+                        if "优质App推荐" in content or "优质 App 推荐" in content:
+                            print(f"🗑️ Found and removing ad page: {f}")
+                            os.remove(file_path)
+                            removed_any = True
+                except:
+                    continue
+    
+    if removed_any:
+        # 如果删除了文件，必须清理 OPF 引用，否则 EPUB 会损坏
+        clean_opf_references(base_dir)
+
+def clean_opf_references(base_dir):
+    """从 content.opf 中注销已删除的文件引用"""
+    opf_path = None
+    for root, _, files in os.walk(base_dir):
+        for f in files:
+            if f.endswith(".opf"):
+                opf_path = os.path.join(root, f)
+                break
+    if not opf_path: return
+
+    ET.register_namespace('', "http://www.idpf.org/2007/opf")
+    tree = ET.parse(opf_path)
+    root_node = tree.getroot()
+    ns = {'opf': 'http://www.idpf.org/2007/opf'}
+
+    # 1. 记录并删除 manifest 中对应的 item
+    manifest = root_node.find("opf:manifest", ns)
+    if manifest is None: manifest = root_node.find("manifest")
+    
+    deleted_ids = []
+    opf_dir = os.path.dirname(opf_path)
+    
+    for item in list(manifest):
+        href = item.get("href")
+        full_href_path = os.path.abspath(os.path.join(opf_dir, href))
+        if not os.path.exists(full_href_path):
+            deleted_ids.append(item.get("id"))
+            manifest.remove(item)
+
+    # 2. 从 spine (阅读顺序) 中移除对应的条目
+    spine = root_node.find("opf:spine", ns)
+    if spine is None: spine = root_node.find("spine")
+    for itemref in list(spine):
+        if itemref.get("idref") in deleted_ids:
+            spine.remove(itemref)
+
+    tree.write(opf_path, encoding="utf-8", xml_declaration=True)
+    print("✨ EPUB manifest references cleaned.")
+
+def repack_epub(source_dir, output_file):
+    """将修改后的文件夹重新压成 EPUB 格式"""
+    with zipfile.ZipFile(output_file, 'w', zipfile.ZIP_DEFLATED) as z:
+        for root, _, files in os.walk(source_dir):
+            for f in files:
+                abs_path = os.path.join(root, f)
+                rel_path = os.path.relpath(abs_path, source_dir)
+                z.write(abs_path, rel_path)
+    print(f"📦 Repacked clean EPUB to {output_file}")
+
+# --------------------------------------------------
+# 核心上传功能 (保持你运行成功的版本)
+# --------------------------------------------------
+
 def upload_to_nextcloud(local_file, edition_date):
     nc_url = os.getenv("NC_URL")
     nc_user = os.getenv("NC_USER")
@@ -76,22 +162,15 @@ def upload_to_nextcloud(local_file, edition_date):
         print("⚠️ Warning: Nextcloud Secrets are missing.")
         return
 
-    # 规范化 URL 格式
     base_url = nc_url.strip().rstrip('/')
-    
-    # 清洗日期用于命名
     clean_date = re.sub(r'[^\w\s-]', '', edition_date).replace(' ', '_') if edition_date else "latest"
     remote_file_name = f"The_Economist_{clean_date}.epub"
-    
-    # 关键点：手动拼接完整 URL，避开 webdav 库的路径解析 Bug
-    # 我们直接尝试上传到 Economist 文件夹下
     target_url = f"{base_url}/Economist/{remote_file_name}"
     
     print(f"🚀 Attempting direct upload to: {target_url}")
 
     try:
         with open(local_file, 'rb') as f:
-            # 使用 HTTP PUT 协议直接上传，这是 WebDAV 的底层原理
             response = requests.put(
                 target_url, 
                 data=f, 
@@ -99,7 +178,6 @@ def upload_to_nextcloud(local_file, edition_date):
                 timeout=120
             )
         
-        # 201 Created 或 204 No Content 代表成功
         if response.status_code in [201, 204]:
             print(f"✅ Successfully uploaded to Nextcloud!")
         elif response.status_code == 404:
@@ -113,7 +191,6 @@ def upload_to_nextcloud(local_file, edition_date):
                 print(f"❌ Fallback failed. Code: {fb_res.status_code}")
         else:
             print(f"❌ Upload Failed. Status Code: {response.status_code}")
-            print(f"📝 Response Text: {response.text}")
             
     except Exception as e:
         print(f"❌ Network/Request Error: {str(e)}")
